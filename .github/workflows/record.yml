@@ -1,8 +1,8 @@
 name: Record Greek audio
 
 # Records the Greek Bible (Septuagint + Textus Receptus NT) in modern Greek pronunciation with the
-# recorder and text from the KJV Bible app repo, in 20 parallel slices, then commits the chapters
-# here (served by GitHub Pages). Chapters already here are skipped, and each slice stops before the
+# recorder and text from the KJV Bible app repo, in 20 parallel slices; each slice commits its
+# chapters here when it finishes (served by GitHub Pages). Chapters already here are skipped, and each slice stops before the
 # 6-hour job limit, so the schedule below simply keeps going until everything is recorded.
 on:
   workflow_dispatch:
@@ -71,36 +71,19 @@ jobs:
       - name: Record slice ${{ matrix.shard }} of 20
         if: steps.left.outputs.n != '0'
         run: python app/tools/greek/generate.py --out new --skip-in . --shard ${{ matrix.shard }}/20 --minutes 300
-      - uses: actions/upload-artifact@v4
+      # Save this slice's chapters right away (other slices may be pushing too, so retry).
+      - name: Commit slice ${{ matrix.shard }}
         if: always() && steps.left.outputs.n != '0'
-        with:
-          name: shard-${{ matrix.shard }}
-          path: new/
-          if-no-files-found: ignore
-          retention-days: 7
-
-  commit:
-    needs: record
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          filter: blob:none
-          sparse-checkout-cone-mode: false
-          sparse-checkout: |
-            /.nojekyll
-            /README.md
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: shard-*
-          merge-multiple: true
-          path: .
-      - name: Commit recordings
         run: |
+          [ -d new ] && [ -n "$(ls -A new)" ] || exit 0
+          cp -r new/. .
           touch .nojekyll
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add --sparse -A
-          git commit -m "Add recorded Greek chapters" || exit 0
-          git push
+          git add --sparse -A -- .nojekyll '*/*.m4a' '*/*.json'
+          git commit -q -m "Add recorded Greek chapters (slice ${{ matrix.shard }})"
+          for i in 1 2 3 4 5 6; do
+            git pull -q --rebase origin main && git push -q origin HEAD:main && exit 0
+            sleep $((RANDOM % 20 + 5))
+          done
+          exit 1
