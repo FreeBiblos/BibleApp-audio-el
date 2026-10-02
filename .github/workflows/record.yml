@@ -1,0 +1,106 @@
+name: Record Greek audio
+
+# Records the Greek Bible (Septuagint + Textus Receptus NT) in modern Greek pronunciation with the
+# recorder and text from the KJV Bible app repo, in 20 parallel slices, then commits the chapters
+# here (served by GitHub Pages). Chapters already here are skipped, and each slice stops before the
+# 6-hour job limit, so the schedule below simply keeps going until everything is recorded.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/record.yml
+  schedule:
+    - cron: "17 */6 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: record
+  cancel-in-progress: false
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+    steps:
+      # Only the small timing files are needed to know which chapters are done.
+      - uses: actions/checkout@v4
+        with:
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*/*.json
+      - uses: actions/checkout@v4
+        with:
+          repository: Bluesboy13/BibleApp
+          ref: claude/sweet-cerf-nr0tgl
+          path: app
+          sparse-checkout: |
+            data
+            tools/greek
+      - name: Anything left?
+        id: left
+        run: |
+          n=$(python3 -c "
+          import json, os
+          g = json.load(open('app/data/lxx-gr.json')); t = json.load(open('app/data/tr.json'))
+          books = {int(k) + 1: v for d in (g, t) for k, v in d['books'].items()}
+          print(sum(1 for b, chs in books.items() for c in range(1, len(chs) + 1) if not os.path.exists(f'{b:02d}/{c:03d}.json')))")
+          echo "Chapters left: $n"
+          echo "n=$n" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-python@v5
+        if: steps.left.outputs.n != '0'
+        with:
+          python-version: "3.11"
+      - name: Install
+        if: steps.left.outputs.n != '0'
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+          pip install --quiet torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cpu
+          pip install --quiet chatterbox-tts soundfile
+      - uses: actions/cache@v4
+        if: steps.left.outputs.n != '0'
+        with:
+          path: ~/.cache/huggingface
+          key: chatterbox-multilingual-v1
+      - name: Record slice ${{ matrix.shard }} of 20
+        if: steps.left.outputs.n != '0'
+        run: python app/tools/greek/generate.py --out new --skip-in . --shard ${{ matrix.shard }}/20 --minutes 300
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.left.outputs.n != '0'
+        with:
+          name: shard-${{ matrix.shard }}
+          path: new/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  commit:
+    needs: record
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /.nojekyll
+            /README.md
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: shard-*
+          merge-multiple: true
+          path: .
+      - name: Commit recordings
+        run: |
+          touch .nojekyll
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add --sparse -A
+          git commit -m "Add recorded Greek chapters" || exit 0
+          git push
